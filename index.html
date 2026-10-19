@@ -1640,16 +1640,28 @@
             { id: 'wpole', pole: 'x', x0: -HALF_W - POLE_LEN, x1: -HALF_W, z0: -0.5, z1: 0.5 },
             { id: 'wplat', x0: -HALF_W - POLE_LEN - EXT_PLAT_SIZE, x1: -HALF_W - POLE_LEN, z0: -EXT_PLAT_SIZE / 2, z1: EXT_PLAT_SIZE / 2, poleId: 'wpole' }
         ];
-        // Which walkable surface is (x, z) on? Poles are tested with a wider
-        // tolerance than the 1-stud beam because bot bodies are wider than the pole:
-        // anything roughly over the beam counts as "crossing it".
+        // Which walkable surface is (x, z) on? Poles use a LATERAL-ONLY tolerance:
+        // the slack (0.75 default) applies across the 1-stud beam so bot bodies
+        // wider than the pole still count as "crossing it", while along the beam's
+        // length the match is near-exact (+/-0.1). The old code inflated the beam
+        // ends too, which handed the seam bands at both ends to the pole surface -
+        // crossing bots circled in those bands and got stuck between the pole area
+        // and the map/platform. Now the seams belong to the surfaces that actually
+        // cover them.
         function surfaceAt(x, z, poleTol, rectTol) {
             const pt = (poleTol === undefined ? 0.75 : poleTol);
             const rt = (rectTol === undefined ? 0 : rectTol);
             for (let i = 0; i < MAP_SURFACES.length; i++) {
                 const s = MAP_SURFACES[i];
-                const t = s.pole ? pt : rt;
-                if (x >= s.x0 - t && x <= s.x1 + t && z >= s.z0 - t && z <= s.z1 + t) return s;
+                if (s.pole) {
+                    if (s.pole === 'z') {
+                        if (Math.abs(x) <= 0.5 + pt && z >= s.z0 - 0.1 && z <= s.z1 + 0.1) return s;
+                    } else {
+                        if (Math.abs(z) <= 0.5 + pt && x >= s.x0 - 0.1 && x <= s.x1 + 0.1) return s;
+                    }
+                } else if (x >= s.x0 - rt && x <= s.x1 + rt && z >= s.z0 - rt && z <= s.z1 + rt) {
+                    return s;
+                }
             }
             return null;
         }
@@ -1675,15 +1687,18 @@
                 return _navWP;
             }
             // Currently crossing a pole: continue outward toward its platform, or
-            // head back to the map if the goal is anywhere else.
+            // head back to the map if the goal is anywhere else. The waypoint aims
+            // PAST the beam end (1.5 studs onto the next surface) so the crossing
+            // always completes - a waypoint inside the beam left bots slowing to a
+            // stop at the seam instead of stepping off the end.
             if (s.pole) {
                 const outward = (g.id === s.id.replace('pole', 'plat'));
                 if (s.pole === 'z') {
                     _navWP.x = 0;
-                    _navWP.z = outward ? s.z1 - 0.6 : s.z0 + 0.6;
+                    _navWP.z = outward ? s.z1 + 1.5 : s.z0 - 1.5;
                 } else {
                     _navWP.z = 0;
-                    _navWP.x = outward ? s.x1 - 0.6 : s.x0 + 0.6;
+                    _navWP.x = outward ? s.x1 + 1.5 : s.x0 - 1.5;
                 }
                 return _navWP;
             }
@@ -1771,7 +1786,7 @@
         let spectateIndexHint = -1;     // last known list index of the watch target
         const graphicsLightBase = { ambient: 0.8, sun: 1.0, hemi: 0 };   // baseline light intensities per graphics level
         
-        let charGroup, charMaterials = [], partMaterials = {}, collisionObjs = [], ladderObjs = []; 
+        let charGroup, charMaterials = [], partMaterials = {}, collisionObjs = [], ladderObjs = [], npcFloorObjs = []; 
         let charHead, pL_Arm, pR_Arm, pL_Leg, pR_Leg, charTorso;
         let meshL_Arm, meshR_Arm;
         
@@ -1945,17 +1960,22 @@
         // ===== SPECIAL BOTS =====
         // Two named champions with fixed identities, each rolling a 15% chance to
         // spawn whenever a bot joins the server (at most one of each at a time).
-        // Both are level 16 with an oversized sword hitbox: a 5x5x5-stud sphere
-        // (radius 2.5 studs vs the regular 2.0) that still deals normal sword damage.
-        const SPECIAL_HIT_RADIUS = 2.5;                 // 5x5x5-stud sphere hitbox
+        // Both are level 16 with an oversized sword hitbox: an 8x8x8-stud sphere
+        // (radius 4 studs) centered on the blade midpoint that still deals normal
+        // sword damage. Each has a display name + username (Roblox style) and a
+        // fixed chat color: DivineFlame chats in BLUE with polite lines, Astralium
+        // chats in PINK with a toxic attitude (kill chat + tbag).
+        const SPECIAL_HIT_RADIUS = 4.0;                 // 8x8x8-stud sphere hitbox
         const SPECIAL_BOTS = {
             DivineFlame: {
-                name: 'DivineFlame', mode: 'Linear', level: 16, bigHitbox: true,
-                colors: { head: 0xffffff, arms: 0xffffff, legs: 0xffffff, torso: 0x101010 }
+                name: 'DivineFlame', username: 'Darkheart_Illuminum', mode: 'Linear', level: 16, bigHitbox: true,
+                colors: { head: 0xffffff, arms: 0xffffff, legs: 0xffffff, torso: 0x101010 },
+                chatColor: '#01A2FF', chatTrait: 'Fair', chatStyle: 'polite'
             },
             Astralium: {
-                name: 'Astralium', mode: 'Focus', level: 16, bigHitbox: true,
-                colors: { head: 0xffffff, arms: 0x101010, legs: 0x2b1454, torso: 0x6225d1 }
+                name: 'Astralium', username: 'XxUnknown_BrockXx', mode: 'Focus', level: 16, bigHitbox: true,
+                colors: { head: 0xffffff, arms: 0x101010, legs: 0x2b1454, torso: 0x6225d1 },
+                chatColor: '#E8BAC8', chatTrait: 'Toxic'
             }
         };
         // Is this special bot currently in the server? (alive or waiting to respawn)
@@ -1966,6 +1986,8 @@
         const BOT_CHAT_FAIR = ['gg', 'good fight', 'well fought', 'nice duel', 'you were tough', 'gg wp', 'good game', 'close one'];
         const BOT_CHAT_TOXIC = ['ez', 'ur trash', 'npc kid', 'get clapped', '0 skill', 'sit down', 'l2p', 'free kill', 'too easy', 'trash kid'];
         const BOT_CHAT_PASSIVE = ['leave me alone', 'i did not want this fight', 'please stop', 'go away', 'sorry', 'not again'];
+        // DivineFlame's polite texting style (blue chat)
+        const BOT_CHAT_POLITE = ['gg, well fought!', 'you fought honorably', 'a fine duel, friend', 'may your blade stay sharp', 'thank you for the battle', 'well met, warrior', 'you did great out there', 'good luck in your next fight', 'it was an honor to cross swords'];
         function randomSpawnPadPos(y) {
             if (spawnPads.length === 0) return new THREE.Vector3(0, (y !== undefined ? y : 8.625), 0);
             const pad = spawnPads[Math.floor(Math.random() * spawnPads.length)];
@@ -2348,9 +2370,10 @@
         }
         // hitRadius (optional): the sword's hit sphere radius. Regular swords use
         // SWORD_HIT_RADIUS (2.0); the special champions pass SPECIAL_HIT_RADIUS
-        // (2.5 = a 5x5x5-stud sphere) so their sword hitbox is bigger than
-        // everyone else's while still dealing normal sword damage.
-        function swordDamageCheck(sword, swingId, st, targetTorso, targetFF, now, onDamage, hitRadius) {
+        // with sphereHit=true - an 8x8x8-stud sphere centered on the blade
+        // midpoint - so their sword hitbox is far bigger than everyone else's
+        // while still dealing normal sword damage.
+        function swordDamageCheck(sword, swingId, st, targetTorso, targetFF, now, onDamage, hitRadius, sphereHit) {
             if (targetFF) { st.inBox = false; st.armed = true; return; }
             if (!sword || !sword.visible) return;
             const R = (hitRadius || SWORD_HIT_RADIUS);
@@ -2363,6 +2386,11 @@
             _pointVec.subVectors(_targetPos, _hilt);
             let t = Math.max(0, Math.min(lineLen, _pointVec.dot(_lineVec)));
             _closestPoint.copy(_hilt).addScaledVector(_lineVec, t);
+            if (sphereHit) {
+                // Sphere mode (special champions): the hitbox is a single sphere
+                // centered on the blade MIDPOINT - distance from there < R.
+                _closestPoint.copy(_hilt).addScaledVector(_lineVec, lineLen / 2);
+            }
             const dist = _closestPoint.distanceTo(_targetPos);
             if (dist < R) {
                 const wasIn = st.inBox;
@@ -2467,7 +2495,7 @@
                             m.lastAttacker = { target: { kind: 'npc', ref: n }, time: performance.now() };
                         }
                         if (m.health <= 0) triggerNPCDeath(m, n);
-                    }, n.bigHitbox ? SPECIAL_HIT_RADIUS : SWORD_HIT_RADIUS);
+                    }, n.bigHitbox ? SPECIAL_HIT_RADIUS : SWORD_HIT_RADIUS, n.bigHitbox);
                 });
             });
 
@@ -2484,7 +2512,7 @@
                         const msg = { t: 'dmg', target: rp.id, dmg: swingDamage(n.swordSwingType), by: 'bot:' + n.name };
                         if (isHost) msg.id = myNetId();
                         if (netJoined && netConns.length > 0) broadcast(msg);
-                    }, n.bigHitbox ? SPECIAL_HIT_RADIUS : SWORD_HIT_RADIUS);
+                    }, n.bigHitbox ? SPECIAL_HIT_RADIUS : SWORD_HIT_RADIUS, n.bigHitbox);
                 });
             });
 
@@ -2518,7 +2546,7 @@
                 const st = stateFor(playerSwordStates, 'npcatk:' + n.id);
                 swordDamageCheck(sw, n.swingId, st, charTorso, isForcefieldActive, now, () => {
                     applyLocalDamage(swingDamage(n.swordSwingType), 'npc', n);
-                }, n.bigHitbox ? SPECIAL_HIT_RADIUS : SWORD_HIT_RADIUS);
+                }, n.bigHitbox ? SPECIAL_HIT_RADIUS : SWORD_HIT_RADIUS, n.bigHitbox);
             });
         }
 
@@ -2634,6 +2662,11 @@
 
                 buildPlayground();
                 createSkyDecorations();
+                // Bot floor-support set: every collision object EXCEPT the ladder
+                // meshes (the truss lattices). Bots don't climb - a floor ray cast
+                // from inside a stacked truss column would otherwise catch the unit
+                // boxes' undersides and "escalate" the bot straight up the column.
+                npcFloorObjs = collisionObjs.filter(o => !ladderObjs.includes(o));
                 
                 try {
                     await document.fonts.load('80px Orbitron');
@@ -3536,8 +3569,8 @@
             });
             npcs.forEach(b => {
                 serverPlayers.push({
-                    displayName: b.name,
-                    username: b.name,
+                    displayName: b.displayName || b.name,
+                    username: b.username || b.name,
                     skinMap: {
                         head: b.colors.head, torso: b.colors.torso,
                         leftArm: b.colors.arms, rightArm: b.colors.arms,
@@ -3576,8 +3609,8 @@
             if (!b) return;
             botProfileOpen = b;
             closePlayerProfileMenu();
-            document.getElementById('bot-profile-name').textContent = b.name;
-            document.getElementById('bot-profile-username').textContent = '@' + b.name;
+            document.getElementById('bot-profile-name').textContent = b.displayName || b.name;
+            document.getElementById('bot-profile-username').textContent = '@' + (b.username || b.name);
             const img = document.querySelector('#bot-profile-snapshot img');
             if (img) img.src = renderAvatarSnapshot({
                 head: b.colors.head, torso: b.colors.torso,
@@ -6250,8 +6283,9 @@
             ];
             remotePlayers.forEach(rp => rows.push({ name: rp.name, kills: rp.st.k || 0, deaths: rp.st.dd || 0, streak: rp.st.ks || 0, color: 'rgba(255,255,255,0.9)' }));
             // Bot battle arena: the bots are server members too - listed with their
-            // rolled names and their own kills/deaths/killstreaks.
-            npcs.forEach(n => rows.push({ name: n.name, kills: n.kills || 0, deaths: n.deaths || 0, streak: n.killstreak || 0, color: 'rgba(255,255,255,0.72)' }));
+            // DISPLAY names (username handles only appear on the People profiles)
+            // and their own kills/deaths/killstreaks.
+            npcs.forEach(n => rows.push({ name: n.displayName || n.name, kills: n.kills || 0, deaths: n.deaths || 0, streak: n.killstreak || 0, color: 'rgba(255,255,255,0.72)' }));
             rows.sort((a, b) => b.kills - a.kills);
             rows.forEach(r => {
                 const row = document.createElement('div');
@@ -7318,58 +7352,39 @@
             // edge and centered along the other axis, spread apart. A 1-stud-thick,
             // 2-stud-wide brown walkway (map color + wood texture) bridges the tops
             // of the two trusses.
+            // THE TRUSS MODEL + CLIMBING: this is the engine's original createTruss()
+            // lattice - a 2x2x2 unit of 12 skeleton sticks + 4 45-degree braces + an
+            // invisible climbable collision cube - stacked TRUSS_HEIGHT/2 units tall.
+            // Every mesh registers in ladderObjs, so the engine's climb physics are
+            // live: walk into the lattice and you climb it, jump to launch off it,
+            // and at the top you mount onto the walkway.
             const TRUSS_HEIGHT = 14;
+            const TRUSS_UNITS = TRUSS_HEIGHT / 2;                     // 2-stud engine truss units
             const NP_CZ = HALF_L + POLE_LEN + EXT_PLAT_SIZE / 2;   // north platform center Z
             const SP_CZ = -(HALF_L + POLE_LEN + EXT_PLAT_SIZE / 2); // south platform center Z
-            const trussCanvas = document.createElement('canvas');
-            trussCanvas.width = 64; trussCanvas.height = 64;
-            {
-                const tx = trussCanvas.getContext('2d');
-                tx.fillStyle = '#b6b6b6'; tx.fillRect(0, 0, 64, 64);
-                tx.strokeStyle = '#7c7c7c'; tx.lineWidth = 5;
-                tx.strokeRect(2.5, 2.5, 59, 59);
-                tx.beginPath();
-                tx.moveTo(3, 3); tx.lineTo(61, 61);       // X brace
-                tx.moveTo(61, 3); tx.lineTo(3, 61);
-                tx.stroke();
-                tx.fillStyle = '#9a9a9a';
-                tx.fillRect(0, 28, 64, 8);                // horizontal bar
-            }
-            const mkTrussTex = (rx, ry) => {
-                const t = new THREE.CanvasTexture(trussCanvas);
-                t.wrapS = THREE.RepeatWrapping; t.wrapT = THREE.RepeatWrapping;
-                t.repeat.set(rx, ry);
-                t.colorSpace = THREE.SRGBColorSpace;
-                t.anisotropy = renderer.capabilities.getMaxAnisotropy();
-                return t;
-            };
-            const trussSideMat = new THREE.MeshStandardMaterial({ map: mkTrussTex(1, TRUSS_HEIGHT / 2), roughness: 0.75, metalness: 0.05 });
-            const trussCapMat = new THREE.MeshStandardMaterial({ map: mkTrussTex(1, 1), roughness: 0.75, metalness: 0.05 });
-            const trussMats = [trussSideMat, trussSideMat, trussCapMat, trussCapMat, trussSideMat, trussSideMat];
-            // Walkway materials: brown wood tiles running along its 80-stud length.
+            // Walkway materials: brown wood tiles running along its 78-stud length.
             const wwEnd = registerTexMat(2 / tile, 1 / tile);
-            const wwSide = registerTexMat(80 / tile, 1 / tile);
-            const wwTop = registerTexMat(80 / tile, 2 / tile);
-            aoState.materials.push(trussSideMat, trussCapMat, wwEnd, wwSide, wwTop);
+            const wwSide = registerTexMat(78 / tile, 1 / tile);
+            const wwTop = registerTexMat(78 / tile, 2 / tile);
+            aoState.materials.push(wwEnd, wwSide, wwTop);
             const buildTrussStructure = (cz) => {
                 [-40, 40].forEach(cx => {                 // 10 studs in from the platform's sides
-                    const truss = new THREE.Mesh(new THREE.BoxGeometry(2, TRUSS_HEIGHT, 2), trussMats);
-                    truss.position.set(cx, PLATFORM_TOP_Y + TRUSS_HEIGHT / 2, cz);
-                    truss.castShadow = true; truss.receiveShadow = true;
-                    truss.userData.topY = PLATFORM_TOP_Y + TRUSS_HEIGHT;
-                    truss.userData.size = new THREE.Vector3(2, TRUSS_HEIGHT, 2);
-                    scene.add(truss);
-                    collisionObjs.push(truss);
-                    aoState.receivers.push(truss);
-                    aoState.occluders.push(truss);
+                    for (let i = 0; i < TRUSS_UNITS; i++) {
+                        const unit = createTruss(0xb6b6b6);            // the engine truss lattice
+                        unit.position.set(cx, PLATFORM_TOP_Y + 1 + i * 2, cz);
+                        scene.add(unit);
+                    }
                 });
-                // Walkway spanning between the truss tops: 1 thick, 2 wide, brown,
-                // same texture as the map.
-                const walk = new THREE.Mesh(new THREE.BoxGeometry(80, 1, 2), [wwEnd, wwEnd, wwTop, wwTop, wwSide, wwSide]);
-                walk.position.set(0, PLATFORM_TOP_Y + TRUSS_HEIGHT + 0.5, cz);
+                // Walkway bridging the truss tops: 1 thick, 2 wide, brown, same wood
+                // texture as the map. Its TOP is flush with the truss tops and it
+                // spans between the two 2x2 truss footprints (x -39..39) so the
+                // climb mount lands on the open truss top and steps straight onto
+                // the bridge at the same height.
+                const walk = new THREE.Mesh(new THREE.BoxGeometry(78, 1, 2), [wwEnd, wwEnd, wwTop, wwTop, wwSide, wwSide]);
+                walk.position.set(0, PLATFORM_TOP_Y + TRUSS_HEIGHT - 0.5, cz);
                 walk.castShadow = true; walk.receiveShadow = true;
-                walk.userData.topY = PLATFORM_TOP_Y + TRUSS_HEIGHT + 1;
-                walk.userData.size = new THREE.Vector3(80, 1, 2);
+                walk.userData.topY = PLATFORM_TOP_Y + TRUSS_HEIGHT;
+                walk.userData.size = new THREE.Vector3(78, 1, 2);
                 scene.add(walk);
                 collisionObjs.push(walk);
                 aoState.receivers.push(walk);
@@ -7810,7 +7825,11 @@
 
                     if (isCurrentlyClimbing) {
                         let stillClimbing = false;
-                        const yLevels = [playerPos.y - 1.5, playerPos.y - 3.0, playerPos.y - 4.5];
+                        // Ankle ray added (feet + 0.2): without it the torso rays go
+                        // past the top of a truss before the feet ever reach mount
+                        // range, so the mount branch could never fire and the climb
+                        // always ended in a drop beside the column.
+                        const yLevels = [playerPos.y - 1.5, playerPos.y - 3.0, playerPos.y - 4.5, playerPos.y - 5.3];
                         for (let y of yLevels) {
                             const origin = new THREE.Vector3(playerPos.x, y, playerPos.z);
                             wallRay.set(origin, currentClimbDir);
@@ -7841,6 +7860,13 @@
                         if (isCurrentlyClimbing) {
                             if (playerPos.y - 5.5 >= climbTopY - 0.5) {
                                 playerPos.y = climbTopY + 5.5;
+                                // Land ON the truss: pull the climber well past the
+                                // face so the body's center finishes over the 2x2
+                                // column footprint (any hug distance 0.1..1.2 studs
+                                // out lands safely inside with this pull) instead of
+                                // tipping off the side and falling back down.
+                                playerPos.x += currentClimbDir.x * 1.3;
+                                playerPos.z += currentClimbDir.z * 1.3;
                                 if (moveKeys.w || moveKeys.a || moveKeys.d || moveKeys.s || joystickVector.length() > 0) {
                                     playerPos.x += moveDelta.x;
                                     playerPos.z += moveDelta.z;
@@ -7860,6 +7886,13 @@
                                 if (joystickVector.y > 0.5) climbDelta -= 11.2 * dt * upDir;
                                 
                                 if (climbDelta > 0) {
+                                    // Cap the rise so the feet can never JUMP past the
+                                    // mount window (top-0.5..top-0.2) in one low-fps
+                                    // step: pausing 0.25 below the hit mesh's top lets
+                                    // the next frame's rays still see the lattice and
+                                    // fire the mount deterministically.
+                                    const mountCap = climbTopY - 0.25 - (playerPos.y - 5.5);
+                                    if (mountCap > 0) climbDelta = Math.min(climbDelta, mountCap);
                                     ceilingRay.set(new THREE.Vector3(playerPos.x, playerPos.y - 0.2, playerPos.z), new THREE.Vector3(0, 1, 0));
                                     const cHHits = ceilingRay.intersectObjects(collisionObjs);
                                     if (cHHits.length > 0 && cHHits[0].distance < 0.9) climbDelta = 0;
@@ -7898,11 +7931,17 @@
                         }
                     } else {
                         const climbCheckDir = moveDir.length() > 0 ? moveDir : new THREE.Vector3(0,0,1).applyAxisAngle(new THREE.Vector3(0,1,0), camYaw);
+                        // The climb probe must reach at least as far as the wall
+                        // collision's stop distance (body radius + this frame's
+                        // travel), otherwise a low frame rate leaves a dead band
+                        // where the player is wall-blocked at the truss face but
+                        // still outside climb range - stuck walking in place.
+                        const climbReach = Math.max(1.2, moveSpeed * dt + 0.6);
                         const yLevels = [playerPos.y - 1.5, playerPos.y - 3.0, playerPos.y - 4.5];
                         for (let y of yLevels) {
                             const origin = new THREE.Vector3(playerPos.x, y, playerPos.z);
                             wallRay.set(origin, climbCheckDir);
-                            wallRay.far = 1.2;
+                            wallRay.far = climbReach;
                             const hits = wallRay.intersectObjects(collisionObjs);
                             if (hits.length > 0) {
                                 const hit = hits[0];
@@ -7919,11 +7958,20 @@
                                 if (isClimbable && playerPos.y - 5.5 < topY - 0.1) {
                                     const originStep = new THREE.Vector3(playerPos.x, playerPos.y - 3.3, playerPos.z);
                                     wallRay.set(originStep, climbCheckDir);
-                                    wallRay.far = 1.2;
+                                    wallRay.far = climbReach;
                                     const hitsStep = wallRay.intersectObjects(collisionObjs);
                                     if (hitsStep.length > 0) {
                                         isCurrentlyClimbing = true;
                                         currentClimbDir.copy(climbCheckDir);
+                                        // Normalize the hug distance: pull the player to
+                                        // ~1.1 studs off the face so the maintain probe
+                                        // (far 1.2) keeps seeing it even when the climb
+                                        // started from farther out at a low frame rate.
+                                        const hugPull = hit.distance - 1.1;
+                                        if (hugPull > 0) {
+                                            playerPos.x -= climbCheckDir.x * hugPull;
+                                            playerPos.z -= climbCheckDir.z * hugPull;
+                                        }
                                         break;
                                     }
                                 }
@@ -8791,7 +8839,7 @@
         // Everyone in the server except the local player: all bots + remote players.
         function spectateMembers() {
             const list = [];
-            npcs.forEach(n => list.push({ kind: 'npc', ref: n, name: n.name }));
+            npcs.forEach(n => list.push({ kind: 'npc', ref: n, name: n.displayName || n.name }));
             remotePlayers.forEach(rp => list.push({ kind: 'remote', ref: rp, name: rp.name }));
             return list;
         }
@@ -8879,17 +8927,39 @@
         }
 
         // ----- HITBOX VISUALIZATION -----
-        // Every sword (player + bots) gets a red-outlined rectangular prism sized to
-        // the NORMAL sword hit volume (capsule bounding box: 4 wide x 4 deep x 8
-        // along the blade) parented to the sword so it follows every swing.
-        // DivineFlame / Astralium render the NORMAL box too - their real 5x5x5
-        // sphere hitbox is deliberately not drawn.
+        // Every sword (player + bots) gets a red wireframe CAPSULE that traces the
+        // REAL hit volume: the SWORD_HIT_RADIUS sphere swept along the blade line
+        // (hilt -0.5 -> tip 3.5). Rings sit at the two sphere centers plus the
+        // dome shoulders, with rails along the swept length - the true shape, far
+        // tighter than the old 4x8x4 bounding box whose empty corners made the
+        // hit volume look twice its actual size.
+        // DivineFlame / Astralium render the NORMAL capsule too - their real
+        // 8x8x8 sphere hitbox is deliberately not drawn.
         function ensureHitboxViz(sword) {
             if (!sword || sword.userData.hitboxViz) return;
-            const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(4, 8, 4));
+            const R = SWORD_HIT_RADIUS;
+            const pts = [];
+            const seg = 20;
+            const mkRing = (y, r) => {
+                for (let i = 0; i < seg; i++) {
+                    const a0 = (i / seg) * Math.PI * 2, a1 = ((i + 1) / seg) * Math.PI * 2;
+                    pts.push(Math.cos(a0) * r, y, Math.sin(a0) * r, Math.cos(a1) * r, y, Math.sin(a1) * r);
+                }
+            };
+            mkRing(-0.5, R);                                   // sphere center at the hilt end
+            mkRing(3.5, R);                                    // sphere center at the tip end
+            const domeR = Math.sqrt(Math.max(0, R * R - 1));   // dome shoulder 1 stud past each end
+            mkRing(-1.5, domeR);
+            mkRing(4.5, domeR);
+            for (let k = 0; k < 4; k++) {                      // rails along the swept cylinder
+                const a = (k / 4) * Math.PI * 2;
+                const x = Math.cos(a) * R, z = Math.sin(a) * R;
+                pts.push(x, -0.5, z, x, 3.5, z);
+            }
+            const geo = new THREE.BufferGeometry();
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
             const mat = new THREE.LineBasicMaterial({ color: 0xff2020, depthTest: false, transparent: true, opacity: 0.95 });
             const lines = new THREE.LineSegments(geo, mat);
-            lines.position.set(0, 1.5, 0);          // blade midpoint (hilt -0.5 -> tip 3.5)
             lines.renderOrder = 998;
             lines.visible = false;
             sword.add(lines);
@@ -9011,8 +9081,9 @@
             // (Aggressive 70% / Neutral 15% / Peaceful 15%), chat ability (50%),
             // chat personality (Fair/Toxic) and chat color from the player palette.
             // SPECIAL: passing 'DivineFlame' or 'Astralium' spawns that named champion
-            // with its fixed colors, level 16, its lunge mode and the big 5x5x5-stud
-            // sword hitbox.
+            // with its fixed colors, level 16, its lunge mode, the big 8x8x8-stud
+            // sphere sword hitbox, its fixed chat color/personality and its display
+            // name + username identity (normal bots use their rolled name for both).
             const spec = special ? SPECIAL_BOTS[special] : null;
             const name = spec ? spec.name : generateBotName();
             const skinC = spec ? spec.colors.head : pickBotColor();   // head + arms (classic Roblox skin grouping)
@@ -9020,7 +9091,7 @@
             const armsC = spec ? spec.colors.arms : skinC;
             const legsC = spec ? spec.colors.legs : pickBotColor();
             const trait = spec ? 'Aggressive' : rollBotTrait();       // champions always fight
-            const chat = spec ? { canChat: true, chatTrait: 'Fair' } : rollBotChat(trait);
+            const chat = spec ? { canChat: true, chatTrait: spec.chatTrait, chatStyle: spec.chatStyle } : rollBotChat(trait);
             const g = new THREE.Group();
             const hM = new THREE.MeshStandardMaterial({ color: skinC, roughness: 0.6 });
             const aM = new THREE.MeshStandardMaterial({ color: armsC, roughness: 0.6 });
@@ -9049,10 +9120,11 @@
             g.position.copy(pos); scene.add(g);
             npcs.push({
                 id: ++npcIdCounter, swingId: 0,
-                name: name, level: spec ? spec.level : rollBotLevel(), mode: spec ? spec.mode : (Math.random() < 0.5 ? 'Linear' : 'Focus'),
+                name: name, displayName: name, username: spec ? spec.username : name,
+                level: spec ? spec.level : rollBotLevel(), mode: spec ? spec.mode : (Math.random() < 0.5 ? 'Linear' : 'Focus'),
                 special: special || null, bigHitbox: !!(spec && spec.bigHitbox),
                 colors: { head: skinC, torso: torsoC, arms: armsC, legs: legsC },
-                trait: trait, canChat: chat.canChat, chatTrait: chat.chatTrait, chatColor: rollBotChatColor(),
+                trait: trait, canChat: chat.canChat, chatTrait: chat.chatTrait, chatStyle: chat.chatStyle || null, chatColor: spec ? spec.chatColor : rollBotChatColor(),
                 kills: 0, deaths: 0, killstreak: 0,
                 group: g, head: h, torso: t, leftArm: la.pivot, rightArm: ra.pivot, leftLeg: ll.pivot, rightLeg: rl.pivot,
                 leftArmMesh: la.mesh, rightArmMesh: ra.mesh, leftLegMesh: ll.mesh, rightLegMesh: rl.mesh,
@@ -9282,7 +9354,7 @@
             const messages = document.getElementById('chat-messages');
             if (!messages) return;
             const div = document.createElement('div');
-            const safeName = String(n.name).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+            const safeName = String(n.displayName || n.name).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
             const safeMsg = String(text).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
             div.innerHTML = '<span class="chat-msg-user" style="color: ' + n.chatColor + ';">[' + safeName + ']:</span> ' + safeMsg;
             messages.appendChild(div);
@@ -9301,9 +9373,12 @@
         function botKillChat(killer) {
             if (!killer || !killer.canChat || Math.random() >= 0.30) return;
             let pool;
-            const eff = effBotTrait(killer);
-            if (eff === 'Aggressive') pool = (killer.chatTrait === 'Toxic') ? BOT_CHAT_TOXIC : BOT_CHAT_FAIR;
-            else pool = BOT_CHAT_PASSIVE;
+            if (killer.chatStyle === 'polite') pool = BOT_CHAT_POLITE;      // DivineFlame's polite texting
+            else {
+                const eff = effBotTrait(killer);
+                if (eff === 'Aggressive') pool = (killer.chatTrait === 'Toxic') ? BOT_CHAT_TOXIC : BOT_CHAT_FAIR;
+                else pool = BOT_CHAT_PASSIVE;
+            }
             addBotChat(killer, pool[Math.floor(Math.random() * pool.length)]);
         }
 
@@ -9420,10 +9495,11 @@
             let gx = n.pos.x + away.x * 10, gz = n.pos.z + away.z * 10;
             if (s) {
                 if (s.pole) {
-                    // ON a beam: flee ALONG the beam toward whichever end is away
-                    // from the threat (never sideways off the line).
-                    if (s.pole === 'z') { gx = 0; gz = (_npcV1.z < s.z0) ? s.z1 - 1 : s.z0 + 1; }
-                    else { gz = 0; gx = (_npcV1.x < s.x0) ? s.x1 - 1 : s.x0 + 1; }
+                    // ON a beam: flee ALONG the beam and PAST its end (2 studs clear
+                    // of the seam, onto the map or the platform) - never sideways
+                    // off the line, and never circling inside the beam itself.
+                    if (s.pole === 'z') { gx = 0; gz = (_npcV1.z < s.z0) ? s.z1 + 2 : s.z0 - 2; }
+                    else { gz = 0; gx = (_npcV1.x < s.x0) ? s.x1 + 2 : s.x0 - 2; }
                 } else {
                     const m = 2.0;
                     gx = Math.max(s.x0 + m, Math.min(s.x1 - m, gx));
@@ -10052,20 +10128,21 @@
             n.pos.x += n.horizontalVel.x * dt;
             n.pos.z += n.horizontalVel.z * dt;
 
-            // POLE-CROSSING GUARD: while a bot is over one of the pole lines, keep it
-            // locked to the beam centerline so normal movement can never drift
-            // sideways off the 1-stud line (hard shoves from other bodies can still
-            // knock a bot off - that fall is intentional). Everywhere else bots walk
-            // freely: walking off the map or platform edge means falling into the void.
+            // POLE-CROSSING GUARD: while a bot is over one of the pole lines (within
+            // the lateral tolerance), lock it to the beam centerline so normal
+            // movement can never drift sideways off the 1-stud line (hard shoves
+            // from other bodies can still knock a bot off - that fall is
+            // intentional). The lock is LATERAL ONLY: the old longitudinal clamp
+            // snapped bots back onto the beam at both end seams, trapping them
+            // between the pole area and the map/platform - now they walk off the
+            // end freely onto whichever surface is there.
             if (n.pos.y - 5.5 >= PLATFORM_TOP_Y - 0.5) {
                 const pole = surfaceAt(n.pos.x, n.pos.z, 0.75, -1);
                 if (pole && pole.pole) {
                     if (pole.pole === 'z') {
                         n.pos.x = THREE.MathUtils.clamp(n.pos.x, -0.4, 0.4);
-                        n.pos.z = THREE.MathUtils.clamp(n.pos.z, pole.z0 + 0.05, pole.z1 - 0.05);
                     } else {
                         n.pos.z = THREE.MathUtils.clamp(n.pos.z, -0.4, 0.4);
-                        n.pos.x = THREE.MathUtils.clamp(n.pos.x, pole.x0 + 0.05, pole.x1 - 0.05);
                     }
                 }
             }
@@ -10073,7 +10150,7 @@
             n.vel.y -= 196.2 * dt; n.pos.y += n.vel.y * dt;
             const nro = new THREE.Vector3(n.pos.x, n.pos.y - 2, n.pos.z); 
             floorRay.set(nro, new THREE.Vector3(0, -1, 0)); floorRay.far = 4.0; 
-            const fH = floorRay.intersectObjects(collisionObjs);
+            const fH = floorRay.intersectObjects(npcFloorObjs);
             if (fH.length > 0 && fH[0].distance < 4.0) { n.pos.y = fH[0].point.y + 5.5; n.vel.y = 0; n.isGrounded = true; } else n.isGrounded = false;
             
             if (!isRagdoll && !n.isDead) {
